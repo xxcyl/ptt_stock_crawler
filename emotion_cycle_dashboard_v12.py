@@ -64,7 +64,55 @@ def ensure_required_columns(df):
         df['signal_confidence'] = 0.0
     return df
 
-def extract_hot_news_titles(df, top_n=8):
+def extract_hot_news_titles(df, top_n=20):
+    """
+    修正版：提取情緒強度最高時期的熱門新聞
+    策略：
+    1. 找出全區間 Ratio 最高的 20 個日子
+    2. 依照「日期倒序 (新 -> 舊)」排列，讓最近發生的事情排在最上面
+    3. 取出前 top_n 筆 (預設 20)
+    """
+    news_column = next((col for col in ['news_titles', 'top_titles'] if col in df.columns), None)
+    if not news_column: return []
+    
+    # 1. 過濾出有新聞的日子
+    df_has_news = df[pd.notna(df[news_column]) & (df[news_column] != "No data") & (df[news_column] != "No news")].copy()
+    if df_has_news.empty: return []
+
+    # 2. 取出「情緒最強」的前 20 天 (這是我們的候選名單)
+    # 我們希望這 20 個最恐慌的日子都能被顯示，或者至少顯示當中最新的
+    target_count = 20
+    panic_days = df_has_news.sort_values('ratio', ascending=False).head(target_count)
+    
+    # 3. 🔥 關鍵修正：改為「日期倒序」排列
+    # 這樣 2026/01 的新聞會排在 2025/08 前面
+    panic_days = panic_days.sort_values('date', ascending=False)
+    
+    all_news = []
+    
+    for _, row in panic_days.iterrows():
+        titles_text = row[news_column]
+        daily_titles = titles_text.split('<br>')
+        for title in daily_titles:
+            # 清洗標題
+            if '[新聞]' in title or '新聞' in title:
+                clean_title = title.replace('🔥', '').replace('[新聞]', '').strip()
+                if ']' in clean_title:
+                    clean_title = clean_title.split(']', 1)[1].strip()
+                
+                # 長度過濾
+                if len(clean_title) > 8:
+                    all_news.append({
+                        'date': row['date'].strftime('%Y/%m/%d'), 
+                        'ratio': f"{row['ratio']:.1f}", 
+                        'title': clean_title[:45] + ('...' if len(clean_title) > 45 else '')
+                    })
+                    break # 一天只取一則，避免洗版
+        
+        if len(all_news) >= top_n:
+            break
+    
+    return all_news
     news_column = next((col for col in ['news_titles', 'top_titles'] if col in df.columns), None)
     if not news_column: return []
     
@@ -364,7 +412,7 @@ st.title("🌊 PTT股板情緒觀測站")
 # --- 頁面分流 (Tabs) ---
 tab1, tab2 = st.tabs(["📊 市場情緒觀測", "🧪 策略回測實驗室"])
 
-# ==================== Tab 1: 觀測模式 (預設) ====================
+# ==================== Tab 1: 觀測模式 ====================
 with tab1:
     st.markdown("### 📈 市場走勢與 PTT 情緒強度")
     st.caption("情緒強度 (Ratio) 紅色標記代表 PTT 討論過度恐慌，通常為市場潛在轉折點。")
@@ -373,20 +421,28 @@ with tab1:
         st.plotly_chart(create_main_chart(df, show_trades=False), use_container_width=True)
         
         st.markdown("---")
-        st.subheader("😱 PTT 恐慌時刻熱門話題")
+        st.subheader("😱 PTT 恐慌時刻熱門話題 (Top 20)")
         
-        hot_news = extract_hot_news_titles(df, 8) 
+        # 🔥 修改：改為提取 20 筆
+        hot_news = extract_hot_news_titles(df, 20) 
+        
         if hot_news:
+            # 使用兩欄排列，左新右舊，或者左右交錯
             c1, c2 = st.columns(2)
             for i, news in enumerate(hot_news):
                 with (c1 if i % 2 == 0 else c2):
                     ratio_val = float(news['ratio'])
+                    # 顏色區分：大於 3.0 用深紅，其餘用橘色
                     badge_color = "#D62728" if ratio_val > 3.0 else "#FF7F0E"
+                    
                     st.markdown(
-                        f"<div style='margin-bottom:10px; padding:10px; border-radius:5px; background-color:#f8f9fa; border-left: 5px solid {badge_color}'>"
-                        f"<small style='color:gray'>{news['date']}</small> "
-                        f"<span style='background-color:{badge_color}; color:white; padding:2px 6px; border-radius:4px; font-size:0.8em'>Ratio: {news['ratio']}</span><br>"
-                        f"<b>{news['title']}</b></div>", 
+                        f"<div style='margin-bottom:12px; padding:12px; border-radius:6px; background-color:#f8f9fa; border-left: 5px solid {badge_color}; box-shadow: 0 1px 3px rgba(0,0,0,0.1)'>"
+                        f"<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:4px'>"
+                        f"<small style='color:#666; font-weight:bold'>{news['date']}</small>"
+                        f"<span style='background-color:{badge_color}; color:white; padding:2px 8px; border-radius:10px; font-size:0.75em; font-weight:bold'>Ratio: {news['ratio']}</span>"
+                        f"</div>"
+                        f"<div style='font-size:1.05em; font-weight:500; color:#333'>{news['title']}</div>"
+                        f"</div>", 
                         unsafe_allow_html=True
                     )
         else:
