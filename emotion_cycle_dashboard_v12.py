@@ -4,213 +4,134 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, date
-import plotly.express as px
+
+# ---------------------------------------------------------
+# 版本資訊 (隱藏於程式碼)
+# Version: v13.4 - Visual Enhanced Edition
+# Date: 2026-02-01
+# Update: 預設最近一年 + 恐慌區間變色與日期標記
+# ---------------------------------------------------------
 
 # 設定頁面
 st.set_page_config(
     layout="wide", 
-    page_title="情緒週期獵人 v13.1 - 風控最終版",
-    page_icon="🛡️"
+    page_title="PTT股板情緒觀測站",
+    page_icon="🌊"
 )
 
 @st.cache_data
 def load_data():
     """載入數據並自動判讀時間範圍"""
     try:
-        # 嘗試載入最新版數據
         try:
             df = pd.read_csv('emotion_cycle_ready_v12_final.csv')
-            data_version = "v12_final"
         except FileNotFoundError:
             try:
                 df = pd.read_csv('emotion_cycle_ready_v12.csv')
-                data_version = "v12"
             except:
                 st.error("❌ 找不到數據檔案 (emotion_cycle_ready_v12_final.csv)")
-                return None, None, []
+                return None, None
             
         df['date'] = pd.to_datetime(df['date'])
-        
-        # 確保必要欄位存在與計算
         df = ensure_required_columns(df)
         
-        # 自動判讀可用年份範圍
         available_years = sorted(df['date'].dt.year.unique())
-        # 排除 2019 以前的數據以確保品質
         reliable_years = [year for year in available_years if year >= 2019]
         
-        return df, data_version, reliable_years
+        return df, reliable_years
         
     except Exception as e:
         st.error(f"數據載入失敗: {e}")
-        return None, None, []
+        return None, []
 
 def ensure_required_columns(df):
-    """確保必要欄位存在，並補足技術指標"""
-    
-    # 基本欄位檢查
     if 'twii_open' not in df.columns and 'twii' in df.columns:
         df['twii_open'] = df['twii']
-    
-    # 確保有 200 日均線 (大趨勢濾網用)
     if 'MA_200' not in df.columns and 'twii' in df.columns:
         df['MA_200'] = df['twii'].rolling(200, min_periods=1).mean()
-        
-    # 確保有漲跌幅 (價格確認用)
     if 'twii_ret' not in df.columns and 'twii' in df.columns:
         df['twii_ret'] = df['twii'].pct_change() * 100
-    
-    # 翻譯週期名稱
-    if 'cycle_phase' in df.columns:
-        phase_translation = {
-            'NORMAL': '正常期',
-            'PANIC_START': '恐慌開始', 
-            'PANIC_BUILDING': '恐慌加劇',
-            'PANIC_PEAK': '恐慌高峰',
-            'FATIGUE': '疲乏期',
-            'RECOVERY': '復甦期'
-        }
-        df['cycle_phase'] = df['cycle_phase'].map(phase_translation).fillna(df['cycle_phase'])
-        
-    # 確保有信號欄位 (若 ETL 沒產出)
     if 'buy_signal_cycle' not in df.columns:
         df['buy_signal_cycle'] = False
         df['signal_confidence'] = 0.0
-    
     return df
 
 def extract_hot_news_titles(df, top_n=8):
-    """
-    修正版：提取「情緒強度 (Ratio) 最高」時期的熱門新聞
-    優先顯示恐慌時刻的標題，而非最近日期
-    """
-    news_column = None
-    for col in ['news_titles', 'top_titles']:
-        if col in df.columns:
-            news_column = col
-            break
+    news_column = next((col for col in ['news_titles', 'top_titles'] if col in df.columns), None)
+    if not news_column: return []
     
-    if news_column is None:
-        return []
-    
-    # 1. 過濾掉沒有新聞的日子
-    df_has_news = df[
-        pd.notna(df[news_column]) & 
-        (df[news_column] != "No data") & 
-        (df[news_column] != "No news")
-    ].copy()
-    
-    if df_has_news.empty:
-        return []
+    df_has_news = df[pd.notna(df[news_column]) & (df[news_column] != "No data") & (df[news_column] != "No news")].copy()
+    if df_has_news.empty: return []
 
-    # 2. 關鍵修正：按「情緒比率 (ratio)」降序排列，取前 20 個最恐慌的日子
-    panic_days = df_has_news.sort_values('ratio', ascending=False).head(20)
-    
-    # 3. 再按日期排序，讓顯示時符合時間軸
-    panic_days = panic_days.sort_values('date')
+    panic_days = df_has_news.sort_values('ratio', ascending=False).head(20).sort_values('date')
     
     all_news = []
-    
     for _, row in panic_days.iterrows():
         titles_text = row[news_column]
-        ratio_val = row['ratio']
-        
         daily_titles = titles_text.split('<br>')
         for title in daily_titles:
-            # 簡單過濾清洗
             if '[新聞]' in title or '新聞' in title:
                 clean_title = title.replace('🔥', '').replace('[新聞]', '').strip()
-                if ']' in clean_title:
-                    clean_title = clean_title.split(']', 1)[1].strip()
-                
-                # 只保留夠長的標題
+                if ']' in clean_title: clean_title = clean_title.split(']', 1)[1].strip()
                 if len(clean_title) > 8:
                     all_news.append({
                         'date': row['date'].strftime('%Y/%m/%d'), 
-                        'ratio': f"{ratio_val:.1f}", # 記錄當下的恐慌指數
+                        'ratio': f"{row['ratio']:.1f}", 
                         'title': clean_title[:45] + ('...' if len(clean_title) > 45 else '')
                     })
-                    break # 一天只取一則最重要的新聞
-    
+                    break 
     return all_news[:top_n]
 
 def generate_time_options(reliable_years):
-    """生成時間選項"""
-    if not reliable_years:
-        return {"全部數據": None}
+    """生成時間選項 (修改：將最近一年設為預設/第一個選項)"""
+    if not reliable_years: return {"全部數據": None}
     
-    min_year = min(reliable_years)
-    max_year = max(reliable_years)
-    
+    # 這裡的順序決定了下拉選單的順序，第一個就是預設值
     options = {
-        f"全部數據 ({min_year}-{max_year})": None,
-        "最近兩年": 730,
-        "最近一年": 365,
+        "最近一年": 365,  # 🔥 修改：移到最上面作為預設
         "最近半年": 180,
+        "最近兩年": 730,
+        f"全部數據 ({min(reliable_years)}-{max(reliable_years)})": None,
     }
-    
     for year in sorted(reliable_years, reverse=True):
         label = f"{year}年"
-        if year == 2022: label += " (熊市/空頭)"
-        elif year == 2021: label += " (牛市/多頭)"
+        if year == 2022: label += " (熊市)"
+        elif year == 2021: label += " (牛市)"
         options[label] = str(year)
-    
     return options
 
 def robust_strategy_backtest(df, hold_days, cost_rate, stop_loss_pct, take_profit_pct):
-    """
-    修正後的策略回測 - 嚴格遵守 T日決策 T+1日執行
-    包含：MA200 濾網、價格回穩確認、動態停損停利
-    """
     trades = []
-    active_trade = None # 單一部位模式
+    active_trade = None
     
-    # 從第 5 天開始遍歷 (確保有足夠歷史數據)
     for i in range(5, len(df) - 1):
-        
-        # ==========================================
-        # 1. 處理現有持倉 (動態出場檢查)
-        # ==========================================
         if active_trade:
-            # 取得今日數據 (Day i)
             current_date = df.iloc[i]['date']
             day_open = df.iloc[i]['twii_open']
-            
             entry_price = active_trade['entry_price']
             sl_price = entry_price * (1 - stop_loss_pct / 100)
             tp_price = entry_price * (1 + take_profit_pct / 100)
-            
-            # 檢查持有天數
             days_held = (current_date - active_trade['entry_date']).days
-            time_exit = days_held >= hold_days
             
             exit_price = None
             exit_reason = None
             
-            # A. 檢查是否開盤就跳空跌破停損 (Gap Down)
             if day_open < sl_price:
                 exit_price = day_open
                 exit_reason = '停損(跳空)'
-            
-            # B. 檢查盤中停損 (以收盤價模擬，若有 Low 數據可更嚴格)
             elif df.iloc[i]['twii'] < sl_price:
                 exit_price = sl_price
                 exit_reason = '停損觸發'
-                
-            # C. 檢查盤中停利
             elif df.iloc[i]['twii'] > tp_price:
                 exit_price = tp_price
                 exit_reason = '停利達標'
-                
-            # D. 時間到出場
-            elif time_exit:
-                exit_price = df.iloc[i]['twii'] # 收盤出場
+            elif days_held >= hold_days:
+                exit_price = df.iloc[i]['twii']
                 exit_reason = '時間到期'
             
             if exit_price:
                 gross_ret = (exit_price / entry_price - 1) * 100
                 net_ret = gross_ret - cost_rate
-                
                 trades.append({
                     '信號日期': active_trade['signal_date'],
                     '進場日期': active_trade['entry_date'],
@@ -221,157 +142,353 @@ def robust_strategy_backtest(df, hold_days, cost_rate, stop_loss_pct, take_profi
                     '出場原因': exit_reason,
                     '毛報酬': gross_ret,
                     '淨報酬': net_ret,
-                    '持有天數': days_held,
-                    '信號信心': active_trade['confidence']
+                    '持有天數': days_held
                 })
-                active_trade = None # 清空持倉
-                
-            continue # 如果有持倉，今天就不再開新倉
+                active_trade = None
+            continue
 
-        # ==========================================
-        # 2. 尋找新買點 (Day i 收盤後決策)
-        # ==========================================
-        
-        # 基礎數據 (全部來自 Day i 或之前，無未來數據)
         curr_ratio = df.iloc[i]['ratio']
         curr_ret = df.iloc[i]['twii_ret']
         curr_close = df.iloc[i]['twii']
         ma_200 = df.iloc[i]['MA_200']
-        
-        # --- 🛡️ 修正 1：大趨勢濾網 (Regime Filter) ---
         is_bear_market = curr_close < ma_200
-        
-        # --- 🛡️ 修正 2：價格回穩確認 (Price Support) ---
         is_falling_knife = curr_ret < -0.5 
         
         buy_signals = []
         confidences = []
         
-        # [策略 A] 疲乏買點 (PTT 情緒退潮)
-        if df.iloc[i]['buy_signal_cycle']:
-            # 必須不是正在大跌
-            if not is_falling_knife: 
-                base_conf = df.iloc[i]['signal_confidence']
-                # 熊市打折
-                final_conf = base_conf * 0.7 if is_bear_market else base_conf
-                
-                if final_conf > 0.5:
-                    buy_signals.append('FATIGUE')
-                    confidences.append(final_conf)
+        if df.iloc[i]['buy_signal_cycle'] and not is_falling_knife:
+            base_conf = df.iloc[i]['signal_confidence']
+            final_conf = base_conf * 0.7 if is_bear_market else base_conf
+            if final_conf > 0.5:
+                buy_signals.append('FATIGUE')
+                confidences.append(final_conf)
         
-        # [策略 B] 傳統恐慌買點 (暴跌反彈)
         if i >= 1:
             prev_ratio = df.iloc[i-1]['ratio']
-            prev_ret = df.iloc[i-1]['twii_ret']
-            
-            # 昨大跌且恐慌 + 今情緒降溫
-            if (prev_ratio > 2.5 and prev_ret < -1.0 and curr_ratio < prev_ratio):
-                # 熊市濾網：熊市需要極度恐慌才買 (Ratio > 3.0)
+            if (prev_ratio > 2.5 and df.iloc[i-1]['twii_ret'] < -1.0 and curr_ratio < prev_ratio):
                 if not is_bear_market or (is_bear_market and prev_ratio > 3.0):
                     if not is_falling_knife:
                         buy_signals.append('TRADITIONAL')
                         confidences.append(0.85)
-        
-        # [策略 C] 適應性買點 (僅牛市開啟)
-        if not is_bear_market:
-            if i >= 20:
-                vol = df.iloc[i-20:i]['ratio'].std()
-                adapt_thresh = 1.5 + vol
-                if curr_ratio > adapt_thresh and df.iloc[i-1]['ratio'] > curr_ratio:
-                    if not is_falling_knife:
-                        buy_signals.append('ADAPTIVE')
-                        confidences.append(0.6)
 
-        # ==========================================
-        # 3. 執行進場 (準備在 Day i+1 開盤買)
-        # ==========================================
         if buy_signals:
             best_idx = np.argmax(confidences)
-            chosen_strat = buy_signals[best_idx]
-            chosen_conf = confidences[best_idx]
-            
             active_trade = {
                 'signal_date': df.iloc[i]['date'],
-                'entry_date': df.iloc[i+1]['date'], # 明天
-                'entry_price': df.iloc[i+1]['twii_open'], # 明天開盤價
-                'strategy': chosen_strat,
-                'confidence': chosen_conf
+                'entry_date': df.iloc[i+1]['date'],
+                'entry_price': df.iloc[i+1]['twii_open'],
+                'strategy': buy_signals[best_idx],
+                'confidence': confidences[best_idx]
             }
 
     return pd.DataFrame(trades)
 
-def analyze_strategy_performance(trades_df):
-    """分析策略績效"""
-    if len(trades_df) == 0:
-        return {}
-    
-    returns = trades_df['淨報酬']
-    
-    performance = {
-        '交易次數': len(trades_df),
-        '總報酬': f"{returns.sum():.2f}%",
-        '勝率': f"{(returns > 0).mean()*100:.1f}%", 
-        '平均報酬': f"{returns.mean():.2f}%",
-        '最大獲利': f"{returns.max():.2f}%",
-        '最大虧損': f"{returns.min():.2f}%",
-        '盈虧比': f"{abs(returns[returns>0].mean() / returns[returns<0].mean()):.2f}" if len(returns[returns<0]) > 0 else "Inf"
-    }
-    
-    return performance
-
-def create_main_chart(df, trades_df):
-    """創建互動圖表"""
+def create_main_chart(df, trades_df=None, show_trades=False):
+    """
+    創建互動圖表 
+    修正：標籤防重疊邏輯改為「強度優先」，確保區間內顯示最高點
+    """
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
-        row_heights=[0.7, 0.3],
-        subplot_titles=("📈 台股指數 (含 MA200 趨勢線)", "🌊 情緒強度"),
-        vertical_spacing=0.05
+        row_heights=[0.6, 0.4], 
+        subplot_titles=("📈 台股指數 (TWII)", "🔥 PTT股板情緒強度 (Ratio)"),
+        vertical_spacing=0.08
     )
     
     # 1. 價格線
-    fig.add_trace(go.Scatter(x=df['date'], y=df['twii'], name="加權指數", line=dict(color='#2E86C1')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df['date'], y=df['twii'], name="加權指數", 
+                            line=dict(color='#2E86C1', width=1.5)), row=1, col=1)
     
-    # 2. MA200 (趨勢濾網視覺化)
-    fig.add_trace(go.Scatter(x=df['date'], y=df['MA_200'], name="200日均線 (牛熊分界)", 
-                            line=dict(color='#888888', dash='dot', width=1)), row=1, col=1)
+    # 2. MA200
+    fig.add_trace(go.Scatter(x=df['date'], y=df['MA_200'], name="200日均線", 
+                            line=dict(color='#999999', dash='dot', width=1)), row=1, col=1)
 
     # 3. 交易點位
-    if not trades_df.empty:
+    if show_trades and trades_df is not None and not trades_df.empty:
         fig.add_trace(go.Scatter(
             x=trades_df['進場日期'], y=trades_df['進場價格'],
-            mode='markers', marker=dict(symbol='triangle-up', color='green', size=10),
-            name='買進', text=trades_df['主要策略']
+            mode='markers', marker=dict(symbol='triangle-up', color='#00CC96', size=10),
+            name='策略買進'
         ), row=1, col=1)
         
-        # 區分獲利與虧損出場
         profit_trades = trades_df[trades_df['淨報酬'] > 0]
-        loss_trades = trades_df[trades_df['淨報酬'] <= 0]
-        
         if not profit_trades.empty:
             fig.add_trace(go.Scatter(
                 x=profit_trades['出場日期'], y=profit_trades['出場價格'],
-                mode='markers', marker=dict(symbol='triangle-down', color='red', size=8),
+                mode='markers', marker=dict(symbol='triangle-down', color='#EF553B', size=8),
                 name='獲利出場'
             ), row=1, col=1)
-            
-        if not loss_trades.empty:
+
+    # 4. 情緒指標 - 基礎線
+    fig.add_trace(go.Scatter(x=df['date'], y=df['ratio'], name="情緒Ratio", 
+                            line=dict(color='#E74C3C', width=1.5)), row=2, col=1)
+    
+    # 5. 恐慌警戒線與標籤優化 (重點修正區域)
+    if 'panic_threshold' in df.columns:
+        fig.add_trace(go.Scatter(x=df['date'], y=df['panic_threshold'], name="動態恐慌線",
+                                line=dict(color='gray', dash='dot', width=1)), row=2, col=1)
+        
+        panic_mask = df['ratio'] > df['panic_threshold']
+        panic_df = df[panic_mask]
+        
+        if not panic_df.empty:
+            # A. 紅色標記
             fig.add_trace(go.Scatter(
-                x=loss_trades['出場日期'], y=loss_trades['出場價格'],
-                mode='markers', marker=dict(symbol='x', color='black', size=8),
-                name='停損出場'
+                x=panic_df['date'], 
+                y=panic_df['ratio'],
+                mode='markers',
+                marker=dict(color='#D62728', size=6),
+                name='過熱/恐慌區',
+                hoverinfo='skip'
+            ), row=2, col=1)
+            
+            # B. 標籤優化：強度優先演算法 (Highest-First)
+            min_days_gap = 12  # 設定最小間隔天數 (稍微加大一點)
+            
+            # 1. 找出所有波段高點
+            peaks = []
+            for i in range(1, len(df)-1):
+                if panic_mask.iloc[i]: 
+                    curr = df.iloc[i]['ratio']
+                    prev = df.iloc[i-1]['ratio']
+                    next_val = df.iloc[i+1]['ratio']
+                    
+                    if curr > prev and curr > next_val:
+                        peaks.append({
+                            'date': df.iloc[i]['date'],
+                            'val': curr
+                        })
+            
+            # 2. 關鍵修正：依照 Ratio 強度由大到小排序！
+            # 這樣保證我們優先處理最高的點
+            peaks.sort(key=lambda x: x['val'], reverse=True)
+            
+            drawn_dates = []
+            
+            # 3. 依序檢查並繪製
+            for p in peaks:
+                p_date = p['date']
+                p_val = p['val']
+                
+                # 檢查是否跟已繪製的點衝突
+                is_colliding = False
+                for existing_date in drawn_dates:
+                    if abs((p_date - existing_date).days) < min_days_gap:
+                        is_colliding = True
+                        break
+                
+                # 只有不衝突才畫，因為我們是從最高的開始畫，所以被跳過的肯定是比較矮的
+                if not is_colliding:
+                    drawn_dates.append(p_date)
+                    
+                    fig.add_annotation(
+                        x=p_date,
+                        y=p_val,
+                        text=p_date.strftime('%m/%d'),
+                        showarrow=True,
+                        arrowhead=1,
+                        ax=0,
+                        ay=-30, # 統一高度，因為篩選過後通常不會擠在一起了
+                        font=dict(color='#D62728', size=11, family="Arial"),
+                        row=2, col=1
+                    )
+
+    fig.update_layout(height=650, hovermode="x unified", template="plotly_white", margin=dict(l=20, r=20, t=60, b=20))
+    return fig
+    """創建互動圖表 (修正：標籤防重疊與交錯顯示)"""
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.6, 0.4], 
+        subplot_titles=("📈 台股指數 (TWII)", "🔥 PTT股板情緒強度 (Ratio)"),
+        vertical_spacing=0.08
+    )
+    
+    # 1. 價格線
+    fig.add_trace(go.Scatter(x=df['date'], y=df['twii'], name="加權指數", 
+                            line=dict(color='#2E86C1', width=1.5)), row=1, col=1)
+    
+    # 2. MA200
+    fig.add_trace(go.Scatter(x=df['date'], y=df['MA_200'], name="200日均線", 
+                            line=dict(color='#999999', dash='dot', width=1)), row=1, col=1)
+
+    # 3. 交易點位
+    if show_trades and trades_df is not None and not trades_df.empty:
+        fig.add_trace(go.Scatter(
+            x=trades_df['進場日期'], y=trades_df['進場價格'],
+            mode='markers', marker=dict(symbol='triangle-up', color='#00CC96', size=10),
+            name='策略買進'
+        ), row=1, col=1)
+        
+        profit_trades = trades_df[trades_df['淨報酬'] > 0]
+        if not profit_trades.empty:
+            fig.add_trace(go.Scatter(
+                x=profit_trades['出場日期'], y=profit_trades['出場價格'],
+                mode='markers', marker=dict(symbol='triangle-down', color='#EF553B', size=8),
+                name='獲利出場'
             ), row=1, col=1)
 
-    # 4. 情緒指標
+    # 4. 情緒指標 - 基礎線
     fig.add_trace(go.Scatter(x=df['date'], y=df['ratio'], name="情緒Ratio", 
-                            line=dict(color='#E74C3C')), row=2, col=1)
+                            line=dict(color='#E74C3C', width=1.5)), row=2, col=1)
     
-    # 閥值線
+    # 5. 恐慌警戒線與標籤優化
     if 'panic_threshold' in df.columns:
-        fig.add_trace(go.Scatter(x=df['date'], y=df['panic_threshold'], name="恐慌線",
+        fig.add_trace(go.Scatter(x=df['date'], y=df['panic_threshold'], name="動態恐慌線",
                                 line=dict(color='gray', dash='dot', width=1)), row=2, col=1)
+        
+        # 篩選出超過恐慌線的資料點
+        panic_mask = df['ratio'] > df['panic_threshold']
+        panic_df = df[panic_mask]
+        
+        if not panic_df.empty:
+            # A. 紅色標記 (保持不變)
+            fig.add_trace(go.Scatter(
+                x=panic_df['date'], 
+                y=panic_df['ratio'],
+                mode='markers',
+                marker=dict(color='#D62728', size=6),
+                name='過熱/恐慌區',
+                hoverinfo='skip'
+            ), row=2, col=1)
+            
+            # B. 標籤防重疊邏輯 (Label Collision Avoidance)
+            last_label_date = None
+            last_label_y = 0
+            min_days_gap = 10  # 設定標籤之間的最小天數間隔
+            
+            # 先找出所有波段高點 (Local Peaks)
+            peaks = []
+            for i in range(1, len(df)-1):
+                if panic_mask.iloc[i]: 
+                    curr = df.iloc[i]['ratio']
+                    prev = df.iloc[i-1]['ratio']
+                    next_val = df.iloc[i+1]['ratio']
+                    
+                    # 嚴格定義波段高點：必須大於左右兩邊
+                    if curr > prev and curr > next_val:
+                        peaks.append((df.iloc[i]['date'], curr))
+            
+            # 依序繪製標籤，加入過濾與交錯
+            for idx, (p_date, p_val) in enumerate(peaks):
+                should_draw = False
+                
+                if last_label_date is None:
+                    should_draw = True
+                else:
+                    # 計算與上一個標籤的天數差距
+                    days_diff = (p_date - last_label_date).days
+                    
+                    if days_diff > min_days_gap:
+                        should_draw = True
+                    else:
+                        # 如果距離很近，但現在這個值比上一個更高，則覆蓋上一個 (這裡是簡單處理，實務上因為已畫上去很難刪除，所以我們採取「更嚴格過濾」)
+                        # 這裡我們只畫「顯著」分開的峰值
+                        pass
 
-    fig.update_layout(height=600, hovermode="x unified", template="plotly_white")
+                if should_draw:
+                    # 交錯顯示高度 (Staggering)
+                    # 偶數索引的標籤拉高一點，奇數索引的標籤低一點，錯開文字
+                    shift_y = -30 if idx % 2 == 0 else -10
+                    
+                    fig.add_annotation(
+                        x=p_date,
+                        y=p_val,
+                        text=p_date.strftime('%m/%d'),
+                        showarrow=True,
+                        arrowhead=1,
+                        ax=0,
+                        ay=shift_y, # 動態高度
+                        font=dict(color='#D62728', size=10, family="Arial"),
+                        row=2, col=1
+                    )
+                    last_label_date = p_date
+
+    fig.update_layout(height=650, hovermode="x unified", template="plotly_white", margin=dict(l=20, r=20, t=60, b=20))
+    return fig
+    """創建互動圖表 (新增：恐慌區間變色與日期標籤)"""
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.6, 0.4], # 調整高度比例讓下方情緒圖更清楚
+        subplot_titles=("📈 台股指數 (TWII)", "🔥 PTT股板情緒強度 (Ratio)"),
+        vertical_spacing=0.08
+    )
+    
+    # 1. 價格線
+    fig.add_trace(go.Scatter(x=df['date'], y=df['twii'], name="加權指數", 
+                            line=dict(color='#2E86C1', width=1.5)), row=1, col=1)
+    
+    # 2. MA200
+    fig.add_trace(go.Scatter(x=df['date'], y=df['MA_200'], name="200日均線", 
+                            line=dict(color='#999999', dash='dot', width=1)), row=1, col=1)
+
+    # 3. 交易點位
+    if show_trades and trades_df is not None and not trades_df.empty:
+        fig.add_trace(go.Scatter(
+            x=trades_df['進場日期'], y=trades_df['進場價格'],
+            mode='markers', marker=dict(symbol='triangle-up', color='#00CC96', size=10),
+            name='策略買進'
+        ), row=1, col=1)
+        
+        profit_trades = trades_df[trades_df['淨報酬'] > 0]
+        if not profit_trades.empty:
+            fig.add_trace(go.Scatter(
+                x=profit_trades['出場日期'], y=profit_trades['出場價格'],
+                mode='markers', marker=dict(symbol='triangle-down', color='#EF553B', size=8),
+                name='獲利出場'
+            ), row=1, col=1)
+
+    # 4. 情緒指標 - 基礎線
+    fig.add_trace(go.Scatter(x=df['date'], y=df['ratio'], name="情緒Ratio", 
+                            line=dict(color='#E74C3C', width=1.5)), row=2, col=1)
+    
+    # 5. 恐慌警戒線
+    if 'panic_threshold' in df.columns:
+        fig.add_trace(go.Scatter(x=df['date'], y=df['panic_threshold'], name="動態恐慌線",
+                                line=dict(color='gray', dash='dot', width=1)), row=2, col=1)
+        
+        # 🔥 修改：加入恐慌區間變色與標籤
+        # 篩選出超過恐慌線的資料點
+        panic_mask = df['ratio'] > df['panic_threshold']
+        panic_df = df[panic_mask]
+        
+        if not panic_df.empty:
+            # A. 用紅色標記超過的點
+            fig.add_trace(go.Scatter(
+                x=panic_df['date'], 
+                y=panic_df['ratio'],
+                mode='markers',
+                marker=dict(color='#D62728', size=6), # 深紅色
+                name='過熱/恐慌區',
+                hoverinfo='skip'
+            ), row=2, col=1)
+            
+            # B. 自動尋找波段高點並標示日期 (避免每個點都標示造成擁擠)
+            # 邏輯：檢查每個點是否比前後兩天都高 (Local Peak)
+            for i in range(1, len(df)-1):
+                if panic_mask.iloc[i]: # 如果當天是恐慌日
+                    curr = df.iloc[i]['ratio']
+                    prev = df.iloc[i-1]['ratio']
+                    next_val = df.iloc[i+1]['ratio']
+                    
+                    # 只有當它是波段高點時才標示
+                    if curr > prev and curr > next_val:
+                        fig.add_annotation(
+                            x=df.iloc[i]['date'],
+                            y=curr,
+                            text=df.iloc[i]['date'].strftime('%m/%d'), # 顯示日期
+                            showarrow=True,
+                            arrowhead=1,
+                            ax=0,
+                            ay=-25, # 標籤往上移
+                            font=dict(color='#D62728', size=11, family="Arial Black"),
+                            row=2, col=1
+                        )
+
+    fig.update_layout(height=650, hovermode="x unified", template="plotly_white", margin=dict(l=20, r=20, t=60, b=20))
     return fig
 
 # ==================== 主程式 ====================
@@ -380,26 +497,17 @@ data_result = load_data()
 if data_result[0] is None:
     st.stop()
 
-df_raw, data_version, reliable_years = data_result
+df_raw, reliable_years = data_result
 
-# --- Sidebar ---
-st.sidebar.title("🌊 情緒週期獵人 v13.1")
-st.sidebar.caption("🛡️ 風控最終版 (Regime Filter + News Fix)")
+# --- 側邊欄 ---
+st.sidebar.title("🌊 PTT股板情緒觀測站")
+st.sidebar.caption("PTT Stock 版大數據分析")
 
-# 時間選擇
+# 時間選擇 (這裡會自動抓取 generate_time_options 的第一個 key 作為預設)
 time_options = generate_time_options(reliable_years)
-selected_period = st.sidebar.selectbox("📅 時間區間", list(time_options.keys()))
+selected_period = st.sidebar.selectbox("📅 選擇觀測區間", list(time_options.keys()))
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ 策略參數")
-
-# 風控參數
-hold_days = st.sidebar.slider("最大持有天數", 5, 40, 20)
-stop_loss = st.sidebar.slider("🛑 停損比例 (%)", 2.0, 15.0, 7.0, 0.5)
-take_profit = st.sidebar.slider("💰 停利比例 (%)", 5.0, 50.0, 15.0, 1.0)
-cost_rate = st.sidebar.slider("交易成本 (%)", 0.0, 1.0, 0.2)
-
-# --- 數據過濾 ---
+# 數據過濾
 if time_options[selected_period] is None:
     df = df_raw[df_raw['date'].dt.year.isin(reliable_years)].copy()
 elif isinstance(time_options[selected_period], int): # 天數
@@ -411,65 +519,82 @@ else: # 特定年份
 
 df = df.reset_index(drop=True)
 
-# --- 執行回測 ---
-trades_df = robust_strategy_backtest(df, hold_days, cost_rate, stop_loss, take_profit)
-perf = analyze_strategy_performance(trades_df)
+# --- 主標題 ---
+st.title("🌊 PTT股板情緒觀測站")
 
-# --- 顯示結果 ---
-st.title("🛡️ 情緒週期獵人 - 風控最終版")
+# --- 頁面分流 (Tabs) ---
+tab1, tab2 = st.tabs(["📊 市場情緒觀測", "🧪 策略回測實驗室"])
 
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1: st.metric("交易次數", perf.get('交易次數', 0))
-with col2: st.metric("總報酬", perf.get('總報酬', '0%'))
-with col3: st.metric("勝率", perf.get('勝率', '0%'))
-with col4: st.metric("最大虧損", perf.get('最大虧損', '0%'))
-with col5: st.metric("盈虧比", perf.get('盈虧比', '0'))
+# ==================== Tab 1: 觀測模式 (預設) ====================
+with tab1:
+    st.markdown("### 📈 市場走勢與 PTT 情緒強度")
+    st.caption("情緒強度 (Ratio) 紅色標記代表 PTT 討論過度恐慌，通常為市場潛在轉折點。")
+    
+    # 顯示圖表
+    st.plotly_chart(create_main_chart(df, show_trades=False), use_container_width=True)
+    
+    # 恐慌新聞區塊
+    st.markdown("---")
+    st.subheader("😱 PTT 恐慌時刻熱門話題")
+    
+    hot_news = extract_hot_news_titles(df, 8) 
+    if hot_news:
+        c1, c2 = st.columns(2)
+        for i, news in enumerate(hot_news):
+            with (c1 if i % 2 == 0 else c2):
+                ratio_val = float(news['ratio'])
+                badge_color = "#D62728" if ratio_val > 3.0 else "#FF7F0E"
+                st.markdown(
+                    f"<div style='margin-bottom:10px; padding:10px; border-radius:5px; background-color:#f8f9fa; border-left: 5px solid {badge_color}'>"
+                    f"<small style='color:gray'>{news['date']}</small> "
+                    f"<span style='background-color:{badge_color}; color:white; padding:2px 6px; border-radius:4px; font-size:0.8em'>Ratio: {news['ratio']}</span><br>"
+                    f"<b>{news['title']}</b></div>", 
+                    unsafe_allow_html=True
+                )
+    else:
+        st.info("此區間無足夠情緒數據。")
 
-st.plotly_chart(create_main_chart(df, trades_df), use_container_width=True)
+# ==================== Tab 2: 策略模式 (進階) ====================
+with tab2:
+    st.markdown("### 🧪 策略回測實驗室")
+    st.caption("模擬若依照「PTT 恐慌情緒買進」策略的歷史績效。")
+    
+    with st.expander("⚙️ 調整策略參數", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            hold_days = st.slider("最大持有天數", 5, 60, 20)
+            cost_rate = st.slider("交易成本 (%)", 0.0, 1.0, 0.2)
+        with c2:
+            stop_loss = st.slider("停損比例 (%)", 2.0, 20.0, 7.0)
+        with c3:
+            take_profit = st.slider("停利比例 (%)", 5.0, 50.0, 15.0)
 
-# --- 📰 (NEW) 恐慌時刻頭條新聞 ---
-st.markdown("---")
-st.subheader("😱 歷史恐慌時刻頭條 (Top Fear News)")
-
-# 自動抓取區間內 Ratio 最高的日子
-hot_news = extract_hot_news_titles(df, 8) 
-
-if hot_news:
-    col1, col2 = st.columns(2)
-    for i, news in enumerate(hot_news):
-        target_col = col1 if i % 2 == 0 else col2
-        with target_col:
-            # 視覺化情緒強度
-            ratio_float = float(news['ratio'])
-            ratio_color = "#D62728" if ratio_float > 3.0 else "#FF7F0E"
-            
-            st.markdown(
-                f"<small>{news['date']}</small> "
-                f"<span style='background-color:{ratio_color}; color:white; padding:2px 6px; border-radius:4px; font-size:0.8em'>Ratio: {news['ratio']}</span><br>"
-                f"**{news['title']}**", 
-                unsafe_allow_html=True
-            )
-else:
-    st.info("⚠️ 此區間無足夠新聞數據，或 ETL 階段未產生新聞標題。")
-
-# --- 詳細交易列表 ---
-st.markdown("---")
-if not trades_df.empty:
-    with st.expander("📝 查看詳細交易記錄", expanded=True):
-        show_df = trades_df[['進場日期', '主要策略', '進場價格', '出場價格', '出場原因', '淨報酬', '持有天數']].copy()
+    trades_df = robust_strategy_backtest(df, hold_days, cost_rate, stop_loss, take_profit)
+    
+    if not trades_df.empty:
+        returns = trades_df['淨報酬']
+        win_rate = (returns > 0).mean() * 100
         
-        show_df['進場價格'] = show_df['進場價格'].apply(lambda x: f"{x:.0f}")
-        show_df['出場價格'] = show_df['出場價格'].apply(lambda x: f"{x:.0f}")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("交易次數", len(trades_df))
+        m2.metric("總報酬", f"{returns.sum():.2f}%", delta_color="normal")
+        m3.metric("勝率", f"{win_rate:.1f}%")
+        m4.metric("平均報酬", f"{returns.mean():.2f}%", 
+                 delta=f"{returns.mean():.2f}%", delta_color="off")
+        
+        st.plotly_chart(create_main_chart(df, trades_df, show_trades=True), use_container_width=True)
+        
+        st.subheader("📝 交易明細")
+        show_df = trades_df[['進場日期', '主要策略', '進場價格', '出場價格', '出場原因', '淨報酬', '持有天數']].copy()
+        show_df['進場日期'] = show_df['進場日期'].dt.date
+        show_df['進場價格'] = show_df['進場價格'].astype(int)
+        show_df['出場價格'] = show_df['出場價格'].astype(int)
         show_df['淨報酬'] = show_df['淨報酬'].apply(lambda x: f"{x:.2f}%")
         
         def color_ret(val):
-            try:
-                val_float = float(val.strip('%'))
-                color = '#ffcccc' if val_float < 0 else '#ccffcc'
-                return f'background-color: {color}'
-            except:
-                return ''
-        
+            color = '#ffcccc' if '-' in val else '#ccffcc'
+            return f'background-color: {color}'
+            
         st.dataframe(show_df.style.applymap(color_ret, subset=['淨報酬']), use_container_width=True)
-else:
-    st.warning("⚠️ 此區間無符合策略與風控條件的交易信號")
+    else:
+        st.warning("⚠️ 在此參數與時間區間下，無觸發任何交易信號。")
