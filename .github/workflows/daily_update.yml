@@ -1,0 +1,47 @@
+name: Daily Stock Emotion Update
+
+# 設定觸發條件：
+# 1. 每天 UTC 21:00 (台灣時間凌晨 05:00) 自動執行
+# 2. workflow_dispatch 允許你手動按按鈕觸發
+on:
+  schedule:
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Crawler (Current Year Only)
+      # 關鍵：使用參數 current_only 只更新今年的資料
+      # 這樣可以避免每天從 2019 重跑導致超時 (GitHub Action 限時 6 小時)
+      run: python crawler_v8.py current_only
+
+    - name: Run ETL Pipeline
+      # 執行你的 ETL 程式，重新計算指標並生成 dashboard 用的 csv
+      run: python emotion_cycle_etl_v12.py
+
+    - name: Commit and Push changes
+      run: |
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+        # 加入所有產生的 csv 檔案
+        git add ptt_*.csv emotion_cycle_ready_v12_final.csv
+        # 如果有變更才提交，避免錯誤
+        git diff --quiet && git diff --staged --quiet || (git commit -m "🤖 Daily Data Update: $(date +'%Y-%m-%d')" && git push)
